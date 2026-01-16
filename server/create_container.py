@@ -6,6 +6,11 @@ import os
 import sys
 
 amount = int(sys.argv[1]) if sys.argv[1] else 1
+startup_timeout_seconds = int(os.getenv("KOLLUS_STARTUP_TIMEOUT_SECONDS", "180"))
+startup_poll_seconds = float(os.getenv("KOLLUS_STARTUP_POLL_SECONDS", "0.5"))
+startup_missing_process_threshold = int(
+    os.getenv("KOLLUS_STARTUP_MISSING_PROCESS_THRESHOLD", "6")
+)
 containers = []
 
 for i in range(amount):
@@ -45,7 +50,38 @@ for i in range(amount):
     containers.append(container)
 
 for container in containers:
-    while not "Connected to root\WMI WMI namespace".encode("utf-8") in container.logs():
-        time.sleep(0.1)
+    start_time = time.time()
+    missing_process_count = 0
+    while True:
+        if "Connected to root\\WMI WMI namespace".encode("utf-8") in container.logs():
+            print(f"Container {container.name} finished startup")
+            break
 
-    print(f"Container {container.name} finished startup")
+        process_result = container.exec_run("pgrep -f KollusAgent.exe")
+        if process_result.exit_code != 0:
+            missing_process_count += 1
+        else:
+            missing_process_count = 0
+
+        if missing_process_count >= startup_missing_process_threshold:
+            print("KollusAgent.exe is not running inside the container.")
+            print(
+                "Container logs:",
+                container.logs().decode("utf-8", errors="replace"),
+                sep="\n",
+            )
+            raise SystemExit(1)
+
+        if time.time() - start_time > startup_timeout_seconds:
+            print(
+                "Startup timed out while waiting for WMI. Container logs:",
+                container.logs().decode("utf-8", errors="replace"),
+                sep="\n",
+            )
+            print(
+                f"Container {container.name} did not report WMI readiness within "
+                f"{startup_timeout_seconds} seconds."
+            )
+            raise SystemExit(1)
+
+        time.sleep(startup_poll_seconds)
